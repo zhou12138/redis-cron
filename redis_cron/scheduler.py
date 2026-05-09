@@ -115,6 +115,8 @@ class RedisScheduler:
         task_id: str | None = None,
         max_retries: int = 0,
         retry_delay: int = 60,
+        start_at: float = 0.0,
+        end_at: float = 0.0,
     ) -> str:
         """创建周期性 Cron 任务。
 
@@ -139,6 +141,33 @@ class RedisScheduler:
         jitter = calc_stable_jitter(user_id, max_jitter)
         fire_time = next_fire + jitter
 
+        # 如果 start_at 在未来，fire_time 不早于 start_at
+        now = time.time()
+        if start_at > now and fire_time < start_at:
+            fire_time = start_at
+
+        # 如果 end_at 已过，标记为 completed 不再调度
+        if end_at > 0 and now > end_at:
+            # 任务已过期，不创建触发
+            task = CronTask(
+                task_id=tid,
+                task_type=task_type,
+                cron=cron,
+                user_id=user_id,
+                shard_id=shard_id,
+                payload=payload or {},
+                fire_time=fire_time,
+                max_jitter=max_jitter,
+                status="completed",
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            await r.hset(f"task:{tid}", mapping=task.to_redis())
+            await r.sadd(f"user_tasks:{user_id}", tid)
+            return tid
+
         task = CronTask(
             task_id=tid,
             task_type=task_type,
@@ -151,6 +180,8 @@ class RedisScheduler:
             status="active",
             max_retries=max_retries,
             retry_delay=retry_delay,
+            start_at=start_at,
+            end_at=end_at,
         )
 
         pipe = r.pipeline()
@@ -171,6 +202,8 @@ class RedisScheduler:
         task_id: str | None = None,
         max_retries: int = 0,
         retry_delay: int = 60,
+        start_at: float = 0.0,
+        end_at: float = 0.0,
     ) -> str:
         """创建一次性延迟任务。
 
@@ -191,6 +224,10 @@ class RedisScheduler:
         tid = task_id or uuid.uuid4().hex
         fire_time = time.time() + delay_seconds
 
+        # 如果 start_at 在未来，fire_time 不早于 start_at
+        if start_at > time.time() and fire_time < start_at:
+            fire_time = start_at
+
         task = Task(
             task_id=tid,
             task_type=task_type,
@@ -201,6 +238,8 @@ class RedisScheduler:
             status="active",
             max_retries=max_retries,
             retry_delay=retry_delay,
+            start_at=start_at,
+            end_at=end_at,
         )
 
         pipe = r.pipeline()

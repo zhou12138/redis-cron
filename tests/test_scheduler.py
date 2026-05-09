@@ -282,6 +282,8 @@ class TestWorker:
             "run_count": "0",
             "fail_count": "0",
             "last_error": "",
+            "start_at": "0",
+            "end_at": "0",
         })
         await fake_redis.hset("processing:shard_0", "t1", str(time.time()))
 
@@ -325,6 +327,8 @@ class TestWorker:
             "run_count": "0",
             "fail_count": "0",
             "last_error": "",
+            "start_at": "0",
+            "end_at": "0",
         })
         await fake_redis.hset("processing:shard_0", "t_status", str(time.time()))
 
@@ -371,6 +375,8 @@ class TestWorker:
             "run_count": "0",
             "fail_count": "0",
             "last_error": "",
+            "start_at": "0",
+            "end_at": "0",
         })
         await fake_redis.hset("processing:shard_0", "t_retry", str(time.time()))
 
@@ -420,6 +426,8 @@ class TestWorker:
             "run_count": "1",
             "fail_count": "1",
             "last_error": "",
+            "start_at": "0",
+            "end_at": "0",
         })
         await fake_redis.hset("processing:shard_0", "t_maxretry", str(time.time()))
 
@@ -458,6 +466,8 @@ class TestWorker:
             "run_count": "0",
             "fail_count": "0",
             "last_error": "",
+            "start_at": "0",
+            "end_at": "0",
         })
         await fake_redis.hset("processing:shard_0", "t_hist", str(time.time()))
 
@@ -656,3 +666,284 @@ class TestSchedulerAdvanced:
 
         members = await fake_redis.smembers("user_tasks:8")
         assert len(members) == 0
+
+
+# ========== start_at / end_at 测试 ==========
+
+
+class TestStartAtEndAt:
+    """测试 start_at 和 end_at 时间窗口功能。"""
+
+    async def _make_scheduler(self, fake_redis):
+        from redis_cron.scheduler import RedisScheduler
+        s = RedisScheduler(redis_url="redis://fake", shard_count=4)
+        s._redis = fake_redis
+        return s
+
+    @pytest.mark.asyncio
+    async def test_start_at_end_at_roundtrip(self):
+        """start_at/end_at 序列化和反序列化应保持一致。"""
+        t = Task(
+            task_id="sa1",
+            task_type="test",
+            start_at=1000.0,
+            end_at=2000.0,
+        )
+        data = t.to_redis()
+        assert data["start_at"] == "1000.0"
+        assert data["end_at"] == "2000.0"
+        restored = Task.from_redis("sa1", data)
+        assert restored.start_at == 1000.0
+        assert restored.end_at == 2000.0
+
+    @pytest.mark.asyncio
+    async def test_cron_start_at_end_at_roundtrip(self):
+        """CronTask start_at/end_at 序列化和反序列化应保持一致。"""
+        t = CronTask(
+            task_id="csa1",
+            task_type="test",
+            cron="* * * * *",
+            start_at=1000.0,
+            end_at=2000.0,
+        )
+        data = t.to_redis()
+        restored = CronTask.from_redis("csa1", data)
+        assert restored.start_at == 1000.0
+        assert restored.end_at == 2000.0
+
+    @pytest.mark.asyncio
+    async def test_create_cron_task_with_start_at(self, fake_redis):
+        """创建带 start_at 的 cron 任务，fire_time 不应早于 start_at。"""
+        s = await self._make_scheduler(fake_redis)
+        future = time.time() + 86400  # 1 day from now
+
+        tid = await s.create_cron_task(
+            "test", "* * * * *", user_id=1, task_id="sa_cron1",
+            start_at=future,
+        )
+        task = await s.get_task(tid)
+        assert task.start_at == future
+        assert task.fire_time >= future
+
+    @pytest.mark.asyncio
+    async def test_create_cron_task_with_past_end_at(self, fake_redis):
+        """创建 end_at 已过的 cron 任务应标记为 completed。"""
+        s = await self._make_scheduler(fake_redis)
+        past = time.time() - 3600
+
+        tid = await s.create_cron_task(
+            "test", "* * * * *", user_id=1, task_id="ea_cron1",
+            end_at=past,
+        )
+        task = await s.get_task(tid)
+        assert task.status == "completed"
+
+        # 不应在触发队列中
+        shard_id = calc_shard_id(1, 4)
+        score = await fake_redis.zscore(f"trigger:shard_{shard_id}", tid)
+        assert score is None
+
+    @pytest.mark.asyncio
+    async def test_create_delayed_task_with_start_at(self, fake_redis):
+        """创建带 start_at 的延迟任务，fire_time 不应早于 start_at。"""
+        s = await self._make_scheduler(fake_redis)
+        future = time.time() + 86400
+
+        tid = await s.create_delayed_task(
+            "test", delay_seconds=10, user_id=1, task_id="sa_delay1",
+            start_at=future,
+        )
+        task = await s.get_task(tid)
+        assert task.start_at == future
+        assert task.fire_time >= future
+
+    @pytest.mark.asyncio
+    async def test_worker_end_at_stops_cron_rescheduling(self, fake_redis):
+        """Worker 执行 cron 任务时，如果 next_fire > end_at，不应重新调度。"""
+        from redis_cron.worker import Worker
+
+        async def handler(task_id: str, payload: dict):
+            pass
+
+        worker = Worker(fake_redis, shard_count=4)
+        worker.register("test_type", handler)
+
+        now = time.time()
+        # end_at is in the past relative to next fire
+        await fake_redis.hset("task:t_end", mapping={
+            "task_type": "test_type",
+            "payload": "{}",
+            "user_id": "0",
+            "shard_id": "0",
+            "fire_time": str(now),
+            "created_at": "0",
+            "max_jitter": "0",
+            "is_cron": "1",
+            "cron": "* * * * *",
+            "status": "active",
+            "max_retries": "0",
+            "retry_count": "0",
+            "retry_delay": "60",
+            "last_run_at": "0",
+            "run_count": "0",
+            "fail_count": "0",
+            "last_error": "",
+            "start_at": "0",
+            "end_at": str(now + 10),  # end_at very soon
+        })
+        await fake_redis.hset("processing:shard_0", "t_end", str(now))
+
+        ok = await worker.execute_task("t_end", 0, now)
+        assert ok is True
+
+        # Task should be completed, not rescheduled
+        status = await fake_redis.hget("task:t_end", "status")
+        s = status.decode() if isinstance(status, bytes) else status
+        assert s == "completed"
+
+        # Should NOT be in the trigger queue
+        score = await fake_redis.zscore("trigger:shard_0", "t_end")
+        assert score is None
+
+
+# ========== 均衡接管 / Rebalance 测试 ==========
+
+
+class TestBalancedOrphanTakeover:
+    """测试 scan_orphan_shards 的均衡接管功能。"""
+
+    @pytest.mark.asyncio
+    async def test_fair_share_quota(self, fake_redis):
+        """节点不应超过公平配额。"""
+        from redis_cron.shard import ShardManager
+
+        # Register 2 alive nodes
+        await fake_redis.set("node:node-1", "alive", ex=15)
+        await fake_redis.set("node:node-2", "alive", ex=15)
+
+        mgr = ShardManager(fake_redis, "node-1", shard_count=8, lock_ttl=15)
+
+        # All shards are orphan, but with 2 nodes fair share = ceil(8/2) = 4
+        acquired = await mgr.scan_orphan_shards()
+        assert len(acquired) <= 4
+        assert len(mgr.my_shards) <= 4
+
+    @pytest.mark.asyncio
+    async def test_random_shuffle_prevents_hotspot(self, fake_redis):
+        """随机打散应导致不同运行获取不同的 shard 顺序。"""
+        import fakeredis.aioredis
+
+        orders = []
+        for _ in range(10):
+            server = fakeredis.aioredis.FakeServer()
+            r = fakeredis.aioredis.FakeRedis(server=server, decode_responses=False)
+
+            from redis_cron.shard import ShardManager
+            await r.set("node:n1", "alive", ex=15)
+            mgr = ShardManager(r, "n1", shard_count=16, lock_ttl=15)
+            acquired = await mgr.scan_orphan_shards()
+            orders.append(tuple(acquired))
+            await r.aclose()
+
+        # Not all orders should be identical (randomness)
+        unique = set(orders)
+        assert len(unique) > 1, "scan_orphan_shards should shuffle — all runs produced same order"
+
+    @pytest.mark.asyncio
+    async def test_multiple_nodes_converge_balanced(self, fake_redis):
+        """多节点应收敛到均衡分配。"""
+        from redis_cron.shard import ShardManager
+
+        shard_count = 8
+        # Register 2 alive nodes
+        await fake_redis.set("node:node-A", "alive", ex=15)
+        await fake_redis.set("node:node-B", "alive", ex=15)
+
+        mgr_a = ShardManager(fake_redis, "node-A", shard_count=shard_count, lock_ttl=15)
+        mgr_b = ShardManager(fake_redis, "node-B", shard_count=shard_count, lock_ttl=15)
+
+        # Both scan for orphans
+        await mgr_a.scan_orphan_shards()
+        await mgr_b.scan_orphan_shards()
+
+        total = len(mgr_a.my_shards) + len(mgr_b.my_shards)
+        assert total == shard_count
+        # Each should have at most ceil(8/2) = 4
+        assert len(mgr_a.my_shards) <= 4
+        assert len(mgr_b.my_shards) <= 4
+
+
+class TestRebalance:
+    """测试主动 Rebalance 功能。"""
+
+    @pytest.mark.asyncio
+    async def test_rebalance_releases_correct_number(self, fake_redis):
+        """Rebalance 应释放正确数量的 shard。"""
+        from redis_cron.shard import ShardManager
+
+        mgr = ShardManager(fake_redis, "node-1", shard_count=8, lock_ttl=15)
+
+        # Node-1 holds all 8 shards
+        for i in range(8):
+            await mgr.try_acquire(i)
+        assert len(mgr.my_shards) == 8
+
+        # Register 2 nodes — fair share = ceil(8/2) = 4
+        await fake_redis.set("node:node-1", "alive", ex=15)
+        await fake_redis.set("node:node-2", "alive", ex=15)
+
+        released = await mgr.rebalance()
+        assert len(released) == 4  # 8 - 4 = 4 excess
+        assert len(mgr.my_shards) == 4
+
+    @pytest.mark.asyncio
+    async def test_rebalance_lifo_order(self, fake_redis):
+        """Rebalance 应按 LIFO 顺序释放（最后获取的先释放）。"""
+        from redis_cron.shard import ShardManager
+
+        mgr = ShardManager(fake_redis, "node-1", shard_count=6, lock_ttl=15)
+
+        # Acquire in order: 0, 1, 2, 3, 4, 5
+        for i in range(6):
+            await mgr.try_acquire(i)
+
+        # Register 2 nodes — fair share = ceil(6/2) = 3
+        await fake_redis.set("node:node-1", "alive", ex=15)
+        await fake_redis.set("node:node-2", "alive", ex=15)
+
+        released = await mgr.rebalance()
+        # Should release last 3: [3, 4, 5]
+        assert released == [3, 4, 5]
+        assert set(mgr.my_shards.keys()) == {0, 1, 2}
+
+    @pytest.mark.asyncio
+    async def test_rebalance_then_scan_balanced(self, fake_redis):
+        """Rebalance 后另一节点 scan_orphan_shards 应达到均衡。"""
+        from redis_cron.shard import ShardManager
+
+        shard_count = 8
+        mgr_old = ShardManager(fake_redis, "node-old", shard_count=shard_count, lock_ttl=15)
+
+        # Old node holds all 8
+        for i in range(shard_count):
+            await mgr_old.try_acquire(i)
+
+        # New node joins
+        await fake_redis.set("node:node-old", "alive", ex=15)
+        await fake_redis.set("node:node-new", "alive", ex=15)
+
+        # Old node rebalances
+        released = await mgr_old.rebalance()
+        assert len(released) == 4
+
+        # New node scans orphans
+        mgr_new = ShardManager(fake_redis, "node-new", shard_count=shard_count, lock_ttl=15)
+        acquired = await mgr_new.scan_orphan_shards()
+        assert len(acquired) == 4
+
+        # Both should have 4
+        assert len(mgr_old.my_shards) == 4
+        assert len(mgr_new.my_shards) == 4
+
+        # No overlap
+        assert set(mgr_old.my_shards.keys()) & set(mgr_new.my_shards.keys()) == set()

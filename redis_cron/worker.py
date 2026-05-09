@@ -101,7 +101,12 @@ class Worker:
                 next_fire = calc_next_fire(task.cron, fire_time)
                 jitter = calc_stable_jitter(task.user_id, task.max_jitter)
                 next_fire += jitter
-                new_status = "active"
+                # 检查 end_at：如果下次触发超过 end_at，不再调度
+                if task.end_at > 0 and next_fire > task.end_at:
+                    next_fire = 0.0
+                    new_status = "completed"
+                else:
+                    new_status = "active"
 
             await self._redis.eval(
                 lua_scripts.ACK_TASK, 2,

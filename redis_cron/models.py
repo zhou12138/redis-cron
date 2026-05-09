@@ -32,6 +32,9 @@ class Task:
     run_count: int = 0
     fail_count: int = 0
     last_error: str = ""
+    # 时间窗口
+    start_at: float = 0.0
+    end_at: float = 0.0
 
     def to_redis(self) -> dict[str, str]:
         """序列化为 Redis HSET 字段映射。"""
@@ -52,6 +55,8 @@ class Task:
             "run_count": str(self.run_count),
             "fail_count": str(self.fail_count),
             "last_error": self.last_error,
+            "start_at": str(self.start_at),
+            "end_at": str(self.end_at),
         }
 
     @classmethod
@@ -80,6 +85,8 @@ class Task:
             run_count=int(_g("run_count", "0")),
             fail_count=int(_g("fail_count", "0")),
             last_error=_g("last_error"),
+            start_at=float(_g("start_at", "0")),
+            end_at=float(_g("end_at", "0")),
         )
 
 
@@ -123,4 +130,6 @@ class CronTask(Task):
             fail_count=int(_g("fail_count", "0")),
             last_error=_g("last_error"),
             cron=_g("cron"),
+            start_at=float(_g("start_at", "0")),
+            end_at=float(_g("end_at", "0")),
         )
