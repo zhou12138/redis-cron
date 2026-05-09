@@ -2,6 +2,7 @@
 
 from .models import CronTask, Task
 from .scheduler import RedisScheduler
+from .worker import TaskHandler
 
-__all__ = ["RedisScheduler", "Task", "CronTask"]
-__version__ = "0.1.0"
+__all__ = ["RedisScheduler", "Task", "CronTask", "TaskHandler"]
+__version__ = "0.2.0"

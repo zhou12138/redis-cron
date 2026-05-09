@@ -1,4 +1,4 @@
-"""Worker：消费任务、幂等执行、回调。"""
+"""Worker：消费任务、幂等执行、回调、重试、执行历史。"""
 
 from __future__ import annotations
 
@@ -29,11 +29,13 @@ class Worker:
         shard_count: int,
         dedup_ttl: int = 3600,
         task_timeout: int = 60,
+        max_history: int = 100,
     ):
         self._redis = redis_client
         self._shard_count = shard_count
         self._dedup_ttl = dedup_ttl
         self._task_timeout = task_timeout
+        self._max_history = max_history
         self._handlers: dict[str, TaskHandler] = {}
         self._running = False
 
@@ -59,6 +61,9 @@ class Worker:
             logger.debug("跳过重复任务 %s", task_id)
             return False
 
+        start_time = time.time()
+        error_msg = ""
+
         try:
             # 读取任务详情
             data = await self._redis.hgetall(f"task:{task_id}")
@@ -80,15 +85,23 @@ class Worker:
                 await self._redis.delete(dedup_key)
                 return False
 
+            # 设置状态为 running
+            await self._redis.hset(f"task:{task_id}", "status", "running")
+
             # 执行
             await asyncio.wait_for(handler(task_id, task.payload), timeout=self._task_timeout)
 
+            # 执行成功
+            duration_ms = int((time.time() - start_time) * 1000)
+
             # ACK：从 processing 移除，cron 任务计算下次触发放回 ZSET
             next_fire = 0.0
+            new_status = "completed"
             if is_cron and isinstance(task, CronTask) and task.cron:
                 next_fire = calc_next_fire(task.cron, fire_time)
                 jitter = calc_stable_jitter(task.user_id, task.max_jitter)
                 next_fire += jitter
+                new_status = "active"
 
             await self._redis.eval(
                 lua_scripts.ACK_TASK, 2,
@@ -97,16 +110,105 @@ class Worker:
                 task_id, str(next_fire),
             )
 
+            # 更新任务统计和状态
+            now = time.time()
+            pipe = self._redis.pipeline()
+            pipe.hset(f"task:{task_id}", mapping={
+                "status": new_status,
+                "last_run_at": str(now),
+                "run_count": str(task.run_count + 1),
+                "retry_count": "0",  # 成功后重置重试计数
+                "last_error": "",
+            })
+            # 记录执行历史
+            history_entry = json.dumps({
+                "fire_time": fire_time,
+                "status": "success",
+                "duration_ms": duration_ms,
+                "error": None,
+            }, ensure_ascii=False)
+            history_key = f"task_history:{task_id}"
+            pipe.lpush(history_key, history_entry)
+            pipe.ltrim(history_key, 0, self._max_history - 1)
+            await pipe.execute()
+
             logger.info("任务 %s 执行成功", task_id)
             return True
 
-        except asyncio.TimeoutError:
-            logger.error("任务 %s 执行超时", task_id)
+        except (asyncio.TimeoutError, Exception) as exc:
+            if isinstance(exc, asyncio.TimeoutError):
+                error_msg = "执行超时"
+                logger.error("任务 %s 执行超时", task_id)
+            else:
+                error_msg = str(exc)
+                logger.exception("任务 %s 执行失败", task_id)
+
+            duration_ms = int((time.time() - start_time) * 1000)
             await self._redis.delete(dedup_key)
-            return False
-        except Exception:
-            logger.exception("任务 %s 执行失败", task_id)
-            await self._redis.delete(dedup_key)
+
+            # 读取当前任务数据用于重试判断
+            data = await self._redis.hgetall(f"task:{task_id}")
+            if data:
+                is_cron = self._get_str(data, "is_cron") == "1"
+                max_retries = int(self._get_str(data, "max_retries") or "0")
+                retry_count = int(self._get_str(data, "retry_count") or "0")
+                retry_delay = int(self._get_str(data, "retry_delay") or "60")
+                run_count = int(self._get_str(data, "run_count") or "0")
+                fail_count = int(self._get_str(data, "fail_count") or "0")
+
+                new_retry_count = retry_count + 1
+                should_retry = max_retries > 0 and new_retry_count <= max_retries
+
+                if should_retry:
+                    # 计算下次重试时间（指数退避）
+                    next_retry_time = time.time() + retry_delay * new_retry_count
+                    new_status = "active"
+                    # 放回 ZSET
+                    pipe = self._redis.pipeline()
+                    pipe.zadd(f"trigger:shard_{shard_id}", {task_id: next_retry_time})
+                    pipe.hdel(f"processing:shard_{shard_id}", task_id)
+                    pipe.hset(f"task:{task_id}", mapping={
+                        "status": new_status,
+                        "retry_count": str(new_retry_count),
+                        "last_run_at": str(time.time()),
+                        "run_count": str(run_count + 1),
+                        "fail_count": str(fail_count + 1),
+                        "last_error": error_msg,
+                    })
+                    history_entry = json.dumps({
+                        "fire_time": fire_time,
+                        "status": "retry",
+                        "duration_ms": duration_ms,
+                        "error": error_msg,
+                    }, ensure_ascii=False)
+                    history_key = f"task_history:{task_id}"
+                    pipe.lpush(history_key, history_entry)
+                    pipe.ltrim(history_key, 0, self._max_history - 1)
+                    await pipe.execute()
+                    logger.info("任务 %s 将在 %.0f 秒后重试 (%d/%d)", task_id, retry_delay * new_retry_count, new_retry_count, max_retries)
+                else:
+                    # 不再重试，标记为 failed
+                    pipe = self._redis.pipeline()
+                    pipe.hdel(f"processing:shard_{shard_id}", task_id)
+                    pipe.hset(f"task:{task_id}", mapping={
+                        "status": "failed",
+                        "retry_count": str(new_retry_count),
+                        "last_run_at": str(time.time()),
+                        "run_count": str(run_count + 1),
+                        "fail_count": str(fail_count + 1),
+                        "last_error": error_msg,
+                    })
+                    history_entry = json.dumps({
+                        "fire_time": fire_time,
+                        "status": "failed",
+                        "duration_ms": duration_ms,
+                        "error": error_msg,
+                    }, ensure_ascii=False)
+                    history_key = f"task_history:{task_id}"
+                    pipe.lpush(history_key, history_entry)
+                    pipe.ltrim(history_key, 0, self._max_history - 1)
+                    await pipe.execute()
+
             return False
 
     @staticmethod

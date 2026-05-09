@@ -21,6 +21,17 @@ class Task:
     fire_time: float = 0.0
     created_at: float = field(default_factory=time.time)
     max_jitter: int = 0
+    # 状态字段
+    status: str = "active"
+    # 重试配置
+    max_retries: int = 0
+    retry_count: int = 0
+    retry_delay: int = 60
+    # 执行统计
+    last_run_at: float = 0.0
+    run_count: int = 0
+    fail_count: int = 0
+    last_error: str = ""
 
     def to_redis(self) -> dict[str, str]:
         """序列化为 Redis HSET 字段映射。"""
@@ -33,6 +44,14 @@ class Task:
             "created_at": str(self.created_at),
             "max_jitter": str(self.max_jitter),
             "is_cron": "0",
+            "status": self.status,
+            "max_retries": str(self.max_retries),
+            "retry_count": str(self.retry_count),
+            "retry_delay": str(self.retry_delay),
+            "last_run_at": str(self.last_run_at),
+            "run_count": str(self.run_count),
+            "fail_count": str(self.fail_count),
+            "last_error": self.last_error,
         }
 
     @classmethod
@@ -41,15 +60,26 @@ class Task:
         def _s(v: bytes | str) -> str:
             return v.decode() if isinstance(v, bytes) else v
 
+        def _g(key: str, default: str = "") -> str:
+            return _s(data.get(key.encode(), data.get(key, default.encode())))
+
         return cls(
             task_id=task_id,
-            task_type=_s(data.get(b"task_type", data.get("task_type", b""))),
-            payload=json.loads(_s(data.get(b"payload", data.get("payload", b"{}")))),
-            user_id=int(_s(data.get(b"user_id", data.get("user_id", b"0")))),
-            shard_id=int(_s(data.get(b"shard_id", data.get("shard_id", b"0")))),
-            fire_time=float(_s(data.get(b"fire_time", data.get("fire_time", b"0")))),
-            created_at=float(_s(data.get(b"created_at", data.get("created_at", b"0")))),
-            max_jitter=int(_s(data.get(b"max_jitter", data.get("max_jitter", b"0")))),
+            task_type=_g("task_type"),
+            payload=json.loads(_g("payload", "{}")),
+            user_id=int(_g("user_id", "0")),
+            shard_id=int(_g("shard_id", "0")),
+            fire_time=float(_g("fire_time", "0")),
+            created_at=float(_g("created_at", "0")),
+            max_jitter=int(_g("max_jitter", "0")),
+            status=_g("status", "active") or "active",
+            max_retries=int(_g("max_retries", "0")),
+            retry_count=int(_g("retry_count", "0")),
+            retry_delay=int(_g("retry_delay", "60") or "60"),
+            last_run_at=float(_g("last_run_at", "0")),
+            run_count=int(_g("run_count", "0")),
+            fail_count=int(_g("fail_count", "0")),
+            last_error=_g("last_error"),
         )
 
 
@@ -72,14 +102,25 @@ class CronTask(Task):
         def _s(v: bytes | str) -> str:
             return v.decode() if isinstance(v, bytes) else v
 
+        def _g(key: str, default: str = "") -> str:
+            return _s(data.get(key.encode(), data.get(key, default.encode())))
+
         return cls(
             task_id=task_id,
-            task_type=_s(data.get(b"task_type", data.get("task_type", b""))),
-            payload=json.loads(_s(data.get(b"payload", data.get("payload", b"{}")))),
-            user_id=int(_s(data.get(b"user_id", data.get("user_id", b"0")))),
-            shard_id=int(_s(data.get(b"shard_id", data.get("shard_id", b"0")))),
-            fire_time=float(_s(data.get(b"fire_time", data.get("fire_time", b"0")))),
-            created_at=float(_s(data.get(b"created_at", data.get("created_at", b"0")))),
-            max_jitter=int(_s(data.get(b"max_jitter", data.get("max_jitter", b"0")))),
-            cron=_s(data.get(b"cron", data.get("cron", b""))),
+            task_type=_g("task_type"),
+            payload=json.loads(_g("payload", "{}")),
+            user_id=int(_g("user_id", "0")),
+            shard_id=int(_g("shard_id", "0")),
+            fire_time=float(_g("fire_time", "0")),
+            created_at=float(_g("created_at", "0")),
+            max_jitter=int(_g("max_jitter", "0")),
+            status=_g("status", "active") or "active",
+            max_retries=int(_g("max_retries", "0")),
+            retry_count=int(_g("retry_count", "0")),
+            retry_delay=int(_g("retry_delay", "60") or "60"),
+            last_run_at=float(_g("last_run_at", "0")),
+            run_count=int(_g("run_count", "0")),
+            fail_count=int(_g("fail_count", "0")),
+            last_error=_g("last_error"),
+            cron=_g("cron"),
         )
