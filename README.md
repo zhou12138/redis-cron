@@ -479,7 +479,7 @@ await scheduler.create_cron_task(
 
 ### 主动 Rebalance
 
-新节点加入后，老节点调用 `rebalance()` 主动释放多余 shard：
+老节点在心跳循环中自动调用 `rebalance` 释放多余 shard
 
 - LIFO 策略：优先释放最近才接管的 shard
 - 释放的 shard 由新节点通过 `scan_orphan_shards()` 接管

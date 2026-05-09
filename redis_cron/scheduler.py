@@ -718,6 +718,12 @@ class RedisScheduler:
                     task = self._shard_tasks.pop(sid, None)
                     if task:
                         task.cancel()
+                # 自动 rebalance：新节点加入后主动释放多余 shard
+                released = await self._shard_mgr.rebalance()
+                for sid in released:
+                    task = self._shard_tasks.pop(sid, None)
+                    if task:
+                        task.cancel()
             except Exception:
                 logger.exception("心跳异常")
             await asyncio.sleep(self._heartbeat_interval)
