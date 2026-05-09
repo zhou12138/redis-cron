@@ -35,6 +35,8 @@ class Task:
     # 时间窗口
     start_at: float = 0.0
     end_at: float = 0.0
+    # 时区
+    timezone: str = "UTC"
 
     def to_redis(self) -> dict[str, str]:
         """序列化为 Redis HSET 字段映射。"""
@@ -57,6 +59,7 @@ class Task:
             "last_error": self.last_error,
             "start_at": str(self.start_at),
             "end_at": str(self.end_at),
+            "timezone": self.timezone,
         }
 
     @classmethod
@@ -87,6 +90,7 @@ class Task:
             last_error=_g("last_error"),
             start_at=float(_g("start_at", "0")),
             end_at=float(_g("end_at", "0")),
+            timezone=_g("timezone", "UTC") or "UTC",
         )
 
 
@@ -132,4 +136,5 @@ class CronTask(Task):
             cron=_g("cron"),
             start_at=float(_g("start_at", "0")),
             end_at=float(_g("end_at", "0")),
+            timezone=_g("timezone", "UTC") or "UTC",
         )

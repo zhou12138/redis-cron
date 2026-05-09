@@ -117,6 +117,7 @@ class RedisScheduler:
         retry_delay: int = 60,
         start_at: float = 0.0,
         end_at: float = 0.0,
+        timezone: str = "UTC",
     ) -> str:
         """创建周期性 Cron 任务。
 
@@ -137,7 +138,7 @@ class RedisScheduler:
         shard_id = calc_shard_id(user_id, self._shard_count)
         tid = task_id or uuid.uuid4().hex
 
-        next_fire = calc_next_fire(cron)
+        next_fire = calc_next_fire(cron, tz=timezone)
         jitter = calc_stable_jitter(user_id, max_jitter)
         fire_time = next_fire + jitter
 
@@ -163,6 +164,7 @@ class RedisScheduler:
                 retry_delay=retry_delay,
                 start_at=start_at,
                 end_at=end_at,
+                timezone=timezone,
             )
             await r.hset(f"task:{tid}", mapping=task.to_redis())
             await r.sadd(f"user_tasks:{user_id}", tid)
@@ -182,6 +184,7 @@ class RedisScheduler:
             retry_delay=retry_delay,
             start_at=start_at,
             end_at=end_at,
+            timezone=timezone,
         )
 
         pipe = r.pipeline()
@@ -204,6 +207,7 @@ class RedisScheduler:
         retry_delay: int = 60,
         start_at: float = 0.0,
         end_at: float = 0.0,
+        timezone: str = "UTC",
     ) -> str:
         """创建一次性延迟任务。
 
@@ -240,6 +244,7 @@ class RedisScheduler:
             retry_delay=retry_delay,
             start_at=start_at,
             end_at=end_at,
+            timezone=timezone,
         )
 
         pipe = r.pipeline()
@@ -345,7 +350,8 @@ class RedisScheduler:
         if cron is not None and is_cron:
             updates["cron"] = cron
             jitter_val = max_jitter if max_jitter is not None else int(self._get_field(data, "max_jitter") or "0")
-            next_fire = calc_next_fire(cron)
+            tz = self._get_field(data, "timezone") or "UTC"
+            next_fire = calc_next_fire(cron, tz=tz)
             jitter = calc_stable_jitter(user_id, jitter_val)
             new_fire_time = next_fire + jitter
             updates["fire_time"] = str(new_fire_time)
@@ -407,7 +413,8 @@ class RedisScheduler:
             cron_expr = self._get_field(data, "cron")
             user_id = int(self._get_field(data, "user_id") or "0")
             max_jitter_val = int(self._get_field(data, "max_jitter") or "0")
-            next_fire = calc_next_fire(cron_expr)
+            tz = self._get_field(data, "timezone") or "UTC"
+            next_fire = calc_next_fire(cron_expr, tz=tz)
             jitter = calc_stable_jitter(user_id, max_jitter_val)
             fire_time = next_fire + jitter
         else:

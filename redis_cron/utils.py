@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
+import datetime
 import time
+from zoneinfo import ZoneInfo
+
 from croniter import croniter
 
 
-def calc_next_fire(cron_expr: str, base_time: float | None = None) -> float:
+def calc_next_fire(cron_expr: str, base_time: float | None = None, tz: str = "UTC") -> float:
     """计算下一次触发时间戳。
 
     Args:
         cron_expr: Cron 表达式，如 "0 8 * * *"
         base_time: 基准时间戳，默认当前时间
+        tz: 时区名称，如 "Asia/Shanghai"，默认 "UTC"
 
     Returns:
         下一次触发的 Unix 时间戳
     """
     base = base_time or time.time()
-    cron = croniter(cron_expr, base)
-    return cron.get_next(float)
+    tzinfo = ZoneInfo(tz)
+    # 将 UTC 时间戳转为目标时区的 datetime
+    base_dt = datetime.datetime.fromtimestamp(base, tz=tzinfo)
+    cron = croniter(cron_expr, base_dt)
+    next_dt = cron.get_next(datetime.datetime)
+    # 确保结果带时区信息，转回 UTC 时间戳
+    if next_dt.tzinfo is None:
+        next_dt = next_dt.replace(tzinfo=tzinfo)
+    return next_dt.timestamp()
 
 
 def calc_stable_jitter(user_id: int, max_jitter: int) -> int:

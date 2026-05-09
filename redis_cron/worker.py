@@ -98,7 +98,7 @@ class Worker:
             next_fire = 0.0
             new_status = "completed"
             if is_cron and isinstance(task, CronTask) and task.cron:
-                next_fire = calc_next_fire(task.cron, fire_time)
+                next_fire = calc_next_fire(task.cron, fire_time, tz=task.timezone)
                 jitter = calc_stable_jitter(task.user_id, task.max_jitter)
                 next_fire += jitter
                 # 检查 end_at：如果下次触发超过 end_at，不再调度

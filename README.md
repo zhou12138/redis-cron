@@ -13,6 +13,7 @@
 - 🔄 **故障转移** — 节点宕机后存活节点均衡接管孤儿 shard（配额制 + 随机打散）
 - ⚖️ **主动 Rebalance** — 新节点加入时老节点自动释放多余 shard
 - ⏰ **时间窗口** — start_at / end_at 控制任务有效执行区间
+- 🌍 **时区支持** — 按目标时区解释 Cron 表达式，自动处理夏令时
 - 🏗️ **灵活部署** — Scheduler / Worker 可同进程或分角色部署
 - 🔁 **自动重试** — 可配置重试次数和指数退避
 - 📊 **执行历史** — 每个任务保留最近 N 次执行记录
@@ -207,6 +208,7 @@ task_id = await scheduler.create_cron_task(
 | `retry_delay` | `int` | `60` | 重试间隔基数（秒），实际间隔 = retry_delay × retry_count |
 | `start_at` | `float` | `0` | 任务生效时间戳，0 表示立即生效。若 > now，首次触发推迟到 start_at |
 | `end_at` | `float` | `0` | 任务过期时间戳，0 表示永不过期。过期后自动标记 completed |
+| `timezone` | `str` | `"UTC"` | 时区名称（如 `"Asia/Shanghai"`），Cron 表达式按此时区解释 |
 
 **返回值**：`str` — 任务 ID
 
@@ -236,6 +238,7 @@ task_id = await scheduler.create_delayed_task(
 | `retry_delay` | `int` | `60` | 重试间隔基数（秒） |
 | `start_at` | `float` | `0` | 任务生效时间戳 |
 | `end_at` | `float` | `0` | 任务过期时间戳 |
+| `timezone` | `str` | `"UTC"` | 时区名称 |
 
 **返回值**：`str` — 任务 ID
 
@@ -365,6 +368,7 @@ deleted_count = await scheduler.bulk_delete_tasks(["id1", "id2", "id3"])
 | `last_error` | `str` | 最后一次错误信息 |
 | `start_at` | `float` | 任务生效时间戳（0 = 立即生效） |
 | `end_at` | `float` | 任务过期时间戳（0 = 永不过期） |
+| `timezone` | `str` | 时区名称（默认 `"UTC"`），Cron 表达式按此时区解释 |
 
 ### `CronTask(Task)` — 周期性任务数据模型
 
@@ -422,6 +426,44 @@ await scheduler.create_cron_task(
 | `end_at = 0` | 永不过期（默认） |
 
 **典型场景：** 营销活动定时推送、试用期任务、限时提醒。
+
+---
+
+## 时区支持
+
+默认情况下，Cron 表达式按 UTC 解释。通过 `timezone` 参数可以指定目标时区：
+
+```python
+# 每天北京时间 9:00 触发（= UTC 01:00）
+await scheduler.create_cron_task(
+    task_type="daily_report",
+    cron="0 9 * * *",
+    user_id=10001,
+    payload={"region": "cn"},
+    timezone="Asia/Shanghai",
+)
+
+# 每天纽约时间 8:00 触发
+await scheduler.create_cron_task(
+    task_type="morning_alert",
+    cron="0 8 * * *",
+    timezone="America/New_York",
+)
+```
+
+**时区名称**使用 IANA 标准格式（如 `Asia/Shanghai`、`America/New_York`、`Europe/London`），基于 Python 标准库 `zoneinfo`，零额外依赖。
+
+### DST（夏令时）处理
+
+对于有夏令时切换的时区（如 `America/New_York`），调度器会自动处理：
+
+| 场景 | 行为 |
+|------|------|
+| **春天跳过**（如 2:00 AM → 3:00 AM） | 如果 Cron 触发时间落在不存在的时段内（如 2:30 AM），该次触发跳过，下一次正常调度 |
+| **秋天重复**（如 2:00 AM → 1:00 AM） | 触发时间落在重复时段内时，按第一次出现计算 |
+| **无 DST 时区**（如 `Asia/Shanghai`） | 行为始终稳定，无需特殊处理 |
+
+**建议：** 对于关键业务任务，优先使用无 DST 的时区（如 UTC 或 Asia/Shanghai），避免夏令时切换带来的不确定性。
 
 ---
 
