@@ -10,7 +10,9 @@
 - ♻️ **两阶段提交** — processing 集合保证任务不丢失
 - 🛡️ **幂等防重** — `task_id + fire_time` 去重 key
 - 🌊 **整点打散** — 基于 user_id 的稳定 jitter，削峰填谷
-- 🔄 **故障转移** — 节点宕机后存活节点自动接管孤儿 shard
+- 🔄 **故障转移** — 节点宕机后存活节点均衡接管孤儿 shard（配额制 + 随机打散）
+- ⚖️ **主动 Rebalance** — 新节点加入时老节点自动释放多余 shard
+- ⏰ **时间窗口** — start_at / end_at 控制任务有效执行区间
 - 🏗️ **灵活部署** — Scheduler / Worker 可同进程或分角色部署
 - 🔁 **自动重试** — 可配置重试次数和指数退避
 - 📊 **执行历史** — 每个任务保留最近 N 次执行记录
@@ -58,6 +60,8 @@ async def main():
         max_jitter=60,
         max_retries=3,
         retry_delay=30,
+        start_at=1715234400.0,   # 指定生效时间
+        end_at=1717826400.0,     # 指定过期时间
     )
 
     # 创建一次性延迟任务
@@ -201,6 +205,8 @@ task_id = await scheduler.create_cron_task(
 | `task_id` | `str \| None` | 自动生成 | 自定义任务 ID |
 | `max_retries` | `int` | `0` | 最大重试次数，0 表示不重试 |
 | `retry_delay` | `int` | `60` | 重试间隔基数（秒），实际间隔 = retry_delay × retry_count |
+| `start_at` | `float` | `0` | 任务生效时间戳，0 表示立即生效。若 > now，首次触发推迟到 start_at |
+| `end_at` | `float` | `0` | 任务过期时间戳，0 表示永不过期。过期后自动标记 completed |
 
 **返回值**：`str` — 任务 ID
 
@@ -228,6 +234,8 @@ task_id = await scheduler.create_delayed_task(
 | `task_id` | `str \| None` | 自动生成 | 自定义任务 ID |
 | `max_retries` | `int` | `0` | 最大重试次数 |
 | `retry_delay` | `int` | `60` | 重试间隔基数（秒） |
+| `start_at` | `float` | `0` | 任务生效时间戳 |
+| `end_at` | `float` | `0` | 任务过期时间戳 |
 
 **返回值**：`str` — 任务 ID
 
@@ -355,6 +363,8 @@ deleted_count = await scheduler.bulk_delete_tasks(["id1", "id2", "id3"])
 | `run_count` | `int` | 总执行次数 |
 | `fail_count` | `int` | 失败次数 |
 | `last_error` | `str` | 最后一次错误信息 |
+| `start_at` | `float` | 任务生效时间戳（0 = 立即生效） |
+| `end_at` | `float` | 任务过期时间戳（0 = 永不过期） |
 
 ### `CronTask(Task)` — 周期性任务数据模型
 
@@ -379,6 +389,64 @@ Redis
 ├── STRING shard_fence:{N}            Fencing Token 计数器
 ├── STRING node:{node_id}             节点注册
 └── STRING dedup:{task_id}:{fire_ts}  幂等去重 key
+```
+
+---
+
+## 时间窗口（start_at / end_at）
+
+控制任务的有效执行区间：
+
+```python
+import time
+
+now = time.time()
+await scheduler.create_cron_task(
+    task_type="campaign_email",
+    cron="0 10 * * *",
+    user_id=10001,
+    payload={"campaign": "summer-sale"},
+    start_at=now + 86400,       # 明天开始
+    end_at=now + 86400 * 30,    # 30 天后过期
+)
+```
+
+**行为规则：**
+
+| 场景 | 行为 |
+|------|------|
+| `start_at > now` | 首次触发时间推迟到 start_at，之后按 cron 正常调度 |
+| `end_at > 0` 且创建时已过期 | 任务直接标记 `completed`，不入调度队列 |
+| cron 执行后 `next_fire_time > end_at` | 任务自动标记 `completed`，不再调度 |
+| `start_at = 0` | 立即生效（默认） |
+| `end_at = 0` | 永不过期（默认） |
+
+**典型场景：** 营销活动定时推送、试用期任务、限时提醒。
+
+---
+
+## 均衡故障转移与 Rebalance
+
+### 均衡接管孤儿 Shard
+
+节点宕机后，存活节点通过 `scan_orphan_shards()` 均衡接管无主 shard：
+
+- 配额制：`ceil(总 shard 数 / 存活节点数) - 已持有数`
+- 随机打散扫描顺序，避免多节点热点竞争
+- 超过配额不再接管，保证各节点负载均衡
+
+### 主动 Rebalance
+
+新节点加入后，老节点调用 `rebalance()` 主动释放多余 shard：
+
+- LIFO 策略：优先释放最近才接管的 shard
+- 释放的 shard 由新节点通过 `scan_orphan_shards()` 接管
+
+**典型流程：**
+```
+3 节点 × 16 shard → 每节点 ~5-6 个
+1 节点宕机 → 2 节点均衡接管 → 每节点 8 个
+新节点加入 → 老节点 rebalance → 新节点接管 → 每节点 ~5-6 个
 ```
 
 ---
